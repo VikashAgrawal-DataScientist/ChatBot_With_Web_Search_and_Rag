@@ -8,7 +8,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-from langchain_community.tools.tavily_search import TavilySearchResults
+try:
+    from langchain_tavily import TavilySearch
+    TAVILY_NEW = True
+except ImportError:
+    st.warning("Install langchain-tavily: pip install langchain-tavily")
+    from langchain_community.tools.tavily_search import TavilySearchResults
+    TAVILY_NEW = False
 
 # Set up the page
 st.set_page_config(page_title="Smart RAG Assistant")
@@ -132,9 +138,38 @@ Answer in a helpful and concise manner:"""
 def perform_web_search(query, tavily_api_key):
     """Perform web search using Tavily"""
     try:
-        search_tool = TavilySearchResults(tavily_api_key=tavily_api_key, max_results=3)
-        results = search_tool.invoke(query)
-        return results
+        if TAVILY_NEW:
+            # Use the new TavilySearch class
+            search_tool = TavilySearch(tavily_api_key=tavily_api_key, max_results=3)
+        else:
+            # Use the deprecated TavilySearchResults with search_depth="basic" to avoid empty results
+            search_tool = TavilySearchResults(
+                tavily_api_key=tavily_api_key, 
+                max_results=3,
+                search_depth="basic"  # Use "basic" instead of "advanced" to avoid empty results
+            )
+        
+        results = search_tool.invoke({"query": query})
+        
+        # Handle the results properly - they can be in different formats
+        if isinstance(results, list):
+            # If results are a list, extract content from each item
+            formatted_results = []
+            for item in results:
+                if isinstance(item, dict):
+                    # Extract relevant information from dictionary items
+                    content = item.get('content', '') or item.get('snippet', '') or str(item)
+                    formatted_results.append(content)
+                else:
+                    formatted_results.append(str(item))
+            return "\n".join(formatted_results)
+        elif isinstance(results, str):
+            # If results are already a string, return as is
+            return results
+        else:
+            # Fallback: convert to string
+            return str(results)
+            
     except Exception as e:
         return f"Web search unavailable: {str(e)}"
 
@@ -179,14 +214,14 @@ if prompt := st.chat_input("Ask a question..."):
                     # Try web search first
                     search_results = perform_web_search(prompt, tavily_api_key)
                     if search_results and not search_results.startswith("Web search unavailable"):
-                        context = "\n".join([str(result) for result in search_results])
+                        # Properly format the search results
                         enhanced_prompt = f"""Based on the following web search results and your knowledge, answer the question:
 
 Search Results:
-{context}
+{search_results}
 
 Question: {prompt}
-Answer:"""
+Please provide a comprehensive answer based on the search results above:"""
                         
                         llm = ChatOpenAI(
                             openai_api_key=openai_api_key,
@@ -195,6 +230,7 @@ Answer:"""
                         )
                         response = llm.invoke(enhanced_prompt)
                         full_response = response.content
+                        full_response += "\n\n*🔍 This answer includes information from web search.*"
                     else:
                         # Fallback to regular LLM
                         llm = ChatOpenAI(
@@ -204,6 +240,8 @@ Answer:"""
                         )
                         response = llm.invoke(prompt)
                         full_response = response.content
+                        if search_results.startswith("Web search unavailable"):
+                            full_response += f"\n\n*⚠️ Note: {search_results}*"
                 else:
                     # Regular LLM response
                     llm = ChatOpenAI(
